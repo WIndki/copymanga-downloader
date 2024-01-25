@@ -31,7 +31,7 @@ console = Console(color_system='256', style=None)
 # 全局化headers，节省空间
 
 retry_strategy = Retry(
-    total=10,
+    total=3,
     status_forcelist=[429, 500, 502, 503, 504],
     backoff_factor=3
 )
@@ -616,12 +616,17 @@ def chapter_allocation(manga_chapter_json):
             f"https://api.{SETTINGS['api_url']}/api/v3/comic/{manga_chapter_info['comic_path_word']}"
             f"/chapter2/{manga_chapter_info['uuid']}?platform=3",
             headers=API_HEADER, proxies=PROXIES)
-        delay_start = time.perf_counter()
+        if response.json()['code'] == 210:
+            print(f"[bold red]请求达到限速[/]")
+            time.sleep(51)
+            response = http.get(
+                f"https://api.{SETTINGS['api_url']}/api/v3/comic/{manga_chapter_info['comic_path_word']}"
+                f"/chapter2/{manga_chapter_info['uuid']}?platform=3",
+                headers=API_HEADER, proxies=PROXIES)
         # 记录API访问量
         api_restriction()
         response.raise_for_status()
         manga_chapter_info_json = response.json()
-
         img_url_contents = manga_chapter_info_json['results']['chapter']['contents']
         img_words = manga_chapter_info_json['results']['chapter']['words']
         manga_name = manga_chapter_info_json['results']['comic']['name']
@@ -664,6 +669,7 @@ def chapter_allocation(manga_chapter_json):
             #     if not os.path.exists(filename):
             #         print(f"\n[blue]发现{filename}下载失败，正在重试[/]")
             #         download(img_url_contents[i]['url'], filename)
+        
         # 实施添加下载进度
         if ARGS and ARGS.subscribe == "1":
             save_new_update(manga_chapter_info_json['results']['chapter']['comic_path_word'],
@@ -676,10 +682,6 @@ def chapter_allocation(manga_chapter_json):
                 create_cbz(str(int(manga_chapter_info_json['results']['chapter']['index']) + 1), chapter_name,
                            manga_name, f"{manga_name}/{chapter_name}/", SETTINGS['cbz_path'])
             print(f"[bold green][:white_check_mark:]已将[{manga_name}]{chapter_name}保存为CBZ存档[/]")
-        delay_end = time.perf_counter()
-        delay = (delay_end - delay_start)
-        if delay < 5 :
-            time.sleep(5-delay)
         
     zipfun(manga_name,download_path)
     remove_download_cache(manga_name)
