@@ -18,7 +18,10 @@ from rich.console import Console
 from rich.prompt import Prompt, Confirm, IntPrompt
 from login import login
 import requests as requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 import platform
+import shutil
 from email import encoders
 from email.header import Header
 from email.mime.base import MIMEBase
@@ -26,6 +29,16 @@ from email.mime.multipart import MIMEMultipart
 
 console = Console(color_system='256', style=None)
 # 全局化headers，节省空间
+
+retry_strategy = Retry(
+    total=10,
+    status_forcelist=[429, 500, 502, 503, 504],
+    backoff_factor=3
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+http = requests.Session()
+http.mount("https://", adapter)
+http.mount("http://", adapter)
 
 API_HEADER = {
     'User-Agent': '"User-Agent" to "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, '
@@ -201,7 +214,7 @@ def updates():
                                         choices=["0", "1"], default="0"))
     if update_want_to == 0:
         new_update = add_updates()
-        response = requests.get(
+        response = http.get(
         f"https://api.{SETTINGS['api_url']}/api/v3/comic/{new_update[0]}/group/{new_update[1]}/chapters?limit=500"
         f"&offset=0&platform=3",
         headers=API_HEADER, proxies=PROXIES)
@@ -330,7 +343,7 @@ def update_download():
 
 def update_get_chapter(manga_path_word, manga_group_path_word, now_chapter):
     # 因为将偏移设置到最后下载的章节，所以可以直接下载全本
-    response = requests.get(
+    response = http.get(
         f"https://api.{SETTINGS['api_url']}/api/v3/comic/{manga_path_word}/group/{manga_group_path_word}/chapters"
         f"?limit=500&offset={now_chapter}&platform=3",
         headers=API_HEADER, proxies=PROXIES)
@@ -357,7 +370,7 @@ def update_get_chapter(manga_path_word, manga_group_path_word, now_chapter):
 # 搜索相关
 
 def search_list(url, offset, current_page_count):
-    response = requests.get(url.format(offset), headers=API_HEADER, proxies=PROXIES)
+    response = http.get(url.format(offset), headers=API_HEADER, proxies=PROXIES)
     # 记录API访问量
     api_restriction()
     # 解析JSON数据
@@ -433,7 +446,7 @@ def search_on_collect():
     retry_count = 0
     while True:
         # 发送GET请求
-        response = requests.get(url.format(offset), headers=API_HEADER, proxies=PROXIES)
+        response = http.get(url.format(offset), headers=API_HEADER, proxies=PROXIES)
         # 记录API访问量
         api_restriction()
         # 解析JSON数据
@@ -489,7 +502,7 @@ def collect_expect():
                              choices=["0", "1"], default="1"))
     while True:
         API_HEADER['authorization'] = SETTINGS['authorization']
-        res = requests.get(url, params=params, headers=API_HEADER)
+        res = http.get(url, params=params, headers=API_HEADER)
         res_json = json.loads(res.text)
         if res_json["code"] != 200:
             print(f"[bold red]无法获取到相关信息，请检查相关设置。Error:{res_json['message']}")
@@ -518,7 +531,7 @@ def collect_expect():
 # 漫画详细相关
 
 def manga_group(manga_path_word):
-    response = requests.get(f"https://api.{SETTINGS['api_url']}/api/v3/comic2/{manga_path_word}",
+    response = http.get(f"https://api.{SETTINGS['api_url']}/api/v3/comic2/{manga_path_word}",
                             headers=API_HEADER, proxies=PROXIES)
     # 记录API访问量
     api_restriction()
@@ -539,11 +552,11 @@ def manga_group(manga_path_word):
 
 
 def manga_chapter(manga_path_word, group_path_word):
-    response = requests.get(
+    response = http.get(
         f"https://api.{SETTINGS['api_url']}/api/v3/comic/{manga_path_word}/group/{group_path_word}/chapters?limit=500"
         f"&offset=0&platform=3",
         headers=API_HEADER, proxies=PROXIES)
-    # 记录API访问量
+    # 记录API访问量word,group_path_word)
     api_restriction()
     response.raise_for_status()
 
@@ -599,10 +612,11 @@ def chapter_allocation(manga_chapter_json):
                              manga_chapter_json['start']:manga_chapter_json['end']]
     # 准备分配章节下载
     for manga_chapter_info in manga_chapter_list:
-        response = requests.get(
+        response = http.get(
             f"https://api.{SETTINGS['api_url']}/api/v3/comic/{manga_chapter_info['comic_path_word']}"
             f"/chapter2/{manga_chapter_info['uuid']}?platform=3",
             headers=API_HEADER, proxies=PROXIES)
+        delay_start = time.perf_counter()
         # 记录API访问量
         api_restriction()
         response.raise_for_status()
@@ -631,19 +645,25 @@ def chapter_allocation(manga_chapter_json):
                     os.mkdir(f"{download_path}/{manga_name}/{chapter_name}/")
                 # 组成下载路径
                 filename = f"{download_path}/{manga_name}/{chapter_name}/{str(img_words[i] + 1).zfill(3)}.jpg"
+                if os.path.exists(filename):
+                    continue
                 t = threading.Thread(target=download, args=(url, filename))
                 # 开始线程
                 threads.append(t)
                 # 限制线程数量(十分不建议修改，不然很可能会被禁止访问)
-                if len(threads) == 4 or i == num_images - 1:
+                if len(threads) == 64 or i == num_images - 1:
                     for t in threads:
                         # 添加一点延迟，错峰请求
-                        time.sleep(0.5)
                         t.start()
                     for t in threads:
-                        time.sleep(0.5)
                         t.join()
                     threads.clear()
+            # for i in range(num_images):
+            #     #检查文件是否完全下载
+            #     filename = f"{download_path}/{manga_name}/{chapter_name}/{str(img_words[i] + 1).zfill(3)}.jpg"
+            #     if not os.path.exists(filename):
+            #         print(f"\n[blue]发现{filename}下载失败，正在重试[/]")
+            #         download(img_url_contents[i]['url'], filename)
         # 实施添加下载进度
         if ARGS and ARGS.subscribe == "1":
             save_new_update(manga_chapter_info_json['results']['chapter']['comic_path_word'],
@@ -656,7 +676,29 @@ def chapter_allocation(manga_chapter_json):
                 create_cbz(str(int(manga_chapter_info_json['results']['chapter']['index']) + 1), chapter_name,
                            manga_name, f"{manga_name}/{chapter_name}/", SETTINGS['cbz_path'])
             print(f"[bold green][:white_check_mark:]已将[{manga_name}]{chapter_name}保存为CBZ存档[/]")
+        delay_end = time.perf_counter()
+        delay = (delay_end - delay_start)
+        if delay < 5 :
+            time.sleep(5-delay)
+        
+    zipfun(manga_name,download_path)
+    remove_download_cache(manga_name)
 
+def zipfun(manga_name,download_path):
+    z = zipfile.ZipFile(f"{download_path}/{manga_name}.zip", 'w', zipfile.ZIP_DEFLATED)
+    with console.status(f"[bold yellow]正在保存[{manga_name}]为ZIP存档[/]"):
+        for dirpath, dirnames, filenames in os.walk(f"{download_path}/{manga_name}/"):
+            fpath = dirpath.replace(f"{download_path}/{manga_name}/", '')
+            fpath = fpath and fpath + os.sep or ''
+            for filename in filenames:
+                z.write(os.path.join(dirpath, filename), fpath + filename)
+    z.close()
+    print(f"[bold green][:white_check_mark:]已将[{manga_name}]保存为ZIP存档[/]")
+
+def remove_download_cache(manga_name):
+    download_path = SETTINGS['download_path']
+    if os.path.exists(f"{download_path}/{manga_name}"):
+        shutil.rmtree(f"{download_path}/{manga_name}")
 
 # 下载相关
 
@@ -667,15 +709,15 @@ def download(url, filename):
         print(f"[blue]您已经下载了{filename}，跳过下载[/]")
         return
     try:
-        img_api_restriction()
         if SETTINGS['HC'] == "1":
             url = url.replace("c800x.jpg", "c1500x.jpg")
-        response = requests.get(url, headers=API_HEADER, proxies=PROXIES)
+        response = http.get(url, headers=API_HEADER, proxies=PROXIES)
         with open(filename, "wb") as f:
             f.write(response.content)
     except Exception as e:
         print(
-            f"[bold red]无法下载{filename}，似乎是CopyManga暂时屏蔽了您的IP，请稍后手动下载对应章节(章节话数为每话下载输出的索引ID),ErrMsg:{e}[/]")
+            f"\n[blod red]无法下载{filename},将在稍后进行重试,ErrMsg:{e}[/]")
+        download(url, filename)
 
 
 # API限制相关
@@ -687,12 +729,6 @@ def api_restriction():
     current_time = OG_SETTINGS['api_time']
     time_diff = time.time() - current_time
     # 判断是否超过60秒
-    if time_diff < 60 and API_COUNTER <= 1:
-        API_COUNTER = API_COUNTER + OG_SETTINGS['API_COUNTER']
-    if API_COUNTER >= 15:
-        API_COUNTER = 0
-        print("[bold yellow]您已经触发到了API请求阈值，我们将等60秒后再进行[/]")
-        time.sleep(60)
     OG_SETTINGS['API_COUNTER'] = API_COUNTER
     OG_SETTINGS['api_time'] = time.time()
     # 将时间戳与API请求数量写入配置文件
@@ -705,12 +741,6 @@ def img_api_restriction():
     # 防止退出后立马再次运行
 
     time_diff = time.time() - IMG_CURRENT_TIME
-    # 判断是否超过60秒
-    if time_diff < 60 and IMG_API_COUNTER >= 100:
-        print("[bold yellow]您已经触发到了图片服务器API请求阈值，我们将等60秒后再进行[/]")
-        time.sleep(60)
-        IMG_CURRENT_TIME = 0
-        IMG_API_COUNTER = 0
 
 
 # 设置相关
@@ -719,7 +749,7 @@ def get_org_url():
     print("[italic yellow]正在获取CopyManga网站Url...[/]")
     url = "https://cdn.jsdelivr.net/gh/misaka10843/copymanga-downloader@master/url.json"
     try:
-        response = requests.get(url, proxies=PROXIES)
+        response = http.get(url, proxies=PROXIES)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -727,7 +757,7 @@ def get_org_url():
         # 更换URL
         url = "https://raw.githubusercontent.com/misaka10843/copymanga-downloader/master/url.json"
         try:
-            response = requests.get(url, proxies=PROXIES)
+            response = http.get(url, proxies=PROXIES)
             response.raise_for_status()
             return response.json()
         except Exception as e:
